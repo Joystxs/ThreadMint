@@ -1,5 +1,5 @@
-;; ThreadMint - Fashion Authentication System
-;; This contract manages fashion item authentication and ownership tracking
+;; ThreadMint - Fashion Authentication System with Marketplace
+;; This contract manages fashion item authentication, ownership tracking, and marketplace transactions
 
 (define-constant contract-owner tx-sender)
 (define-constant err-not-authorized (err u100))
@@ -8,6 +8,14 @@
 (define-constant err-not-owner (err u103))
 (define-constant err-invalid-brand (err u104))
 (define-constant err-invalid-input (err u105))
+(define-constant err-listing-not-found (err u106))
+(define-constant err-item-not-for-sale (err u107))
+(define-constant err-insufficient-payment (err u108))
+(define-constant err-cannot-buy-own-item (err u109))
+(define-constant err-escrow-not-found (err u110))
+(define-constant err-escrow-expired (err u111))
+(define-constant err-escrow-not-expired (err u112))
+(define-constant err-already-listed (err u113))
 
 ;; Storage for fashion items
 (define-map fashion-items
@@ -42,9 +50,36 @@
   }
 )
 
+;; Marketplace listings
+(define-map marketplace-listings
+  { item-id: uint }
+  {
+    seller: principal,
+    price: uint,
+    listed-at: uint,
+    active: bool
+  }
+)
+
+;; Escrow system
+(define-map escrow-transactions
+  { escrow-id: uint }
+  {
+    item-id: uint,
+    buyer: principal,
+    seller: principal,
+    amount: uint,
+    created-at: uint,
+    expires-at: uint,
+    status: (string-ascii 20)
+  }
+)
+
 ;; Data variables
 (define-data-var next-item-id uint u1)
 (define-data-var total-certified-items uint u0)
+(define-data-var next-escrow-id uint u1)
+(define-data-var escrow-duration uint u144) ;; ~24 hours in blocks
 
 ;; Enhanced validation functions
 (define-private (validate-string-input (input (string-ascii 100)))
@@ -79,10 +114,17 @@
   (<= score u100)
 )
 
+(define-private (validate-amount (amount uint))
+  (> amount u0)
+)
+
+(define-private (validate-escrow-id (escrow-id uint))
+  (and (> escrow-id u0) (< escrow-id (var-get next-escrow-id)))
+)
+
 ;; Read-only functions with enhanced validation
 (define-read-only (get-item-details (item-id uint))
   (begin
-    ;; For read-only functions, we can still validate but return none instead of error
     (if (validate-item-id item-id)
       (map-get? fashion-items { item-id: item-id })
       none
@@ -120,6 +162,27 @@
       item-data (is-eq (get owner item-data) user)
       false
     )
+    false
+  )
+)
+
+(define-read-only (get-listing (item-id uint))
+  (if (validate-item-id item-id)
+    (map-get? marketplace-listings { item-id: item-id })
+    none
+  )
+)
+
+(define-read-only (get-escrow-details (escrow-id uint))
+  (if (validate-escrow-id escrow-id)
+    (map-get? escrow-transactions { escrow-id: escrow-id })
+    none
+  )
+)
+
+(define-read-only (is-item-listed (item-id uint))
+  (match (get-listing item-id)
+    listing-data (get active listing-data)
     false
   )
 )
@@ -194,6 +257,9 @@
       (asserts! (is-eq tx-sender current-owner) err-not-owner)
       (asserts! (not (is-eq current-owner new-owner)) err-invalid-input)
       
+      ;; Remove from marketplace if listed
+      (map-delete marketplace-listings { item-id: item-id })
+      
       (map-set fashion-items
         { item-id: item-id }
         (merge item-data { owner: new-owner })
@@ -240,6 +306,174 @@
         { item-id: item-id }
         (merge item-data { authenticity-score: new-score })
       )
+      (ok true)
+    )
+  )
+)
+
+;; Marketplace functions
+(define-public (list-item-for-sale (item-id uint) (price uint))
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-item-id item-id) err-invalid-input)
+    (asserts! (validate-amount price) err-invalid-input)
+    
+    (let (
+      (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+      (current-owner (get owner item-data))
+    )
+      (asserts! (is-eq tx-sender current-owner) err-not-owner)
+      (asserts! (not (is-item-listed item-id)) err-already-listed)
+      
+      (map-set marketplace-listings
+        { item-id: item-id }
+        {
+          seller: current-owner,
+          price: price,
+          listed-at: stacks-block-height,
+          active: true
+        }
+      )
+      (ok true)
+    )
+  )
+)
+
+(define-public (remove-listing (item-id uint))
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-item-id item-id) err-invalid-input)
+    
+    (let (
+      (listing-data (unwrap! (map-get? marketplace-listings { item-id: item-id }) err-listing-not-found))
+      (seller (get seller listing-data))
+    )
+      (asserts! (is-eq tx-sender seller) err-not-owner)
+      (asserts! (get active listing-data) err-item-not-for-sale)
+      
+      (map-set marketplace-listings
+        { item-id: item-id }
+        (merge listing-data { active: false })
+      )
+      (ok true)
+    )
+  )
+)
+
+(define-public (create-purchase-escrow (item-id uint))
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-item-id item-id) err-invalid-input)
+    
+    (let (
+      (listing-data (unwrap! (map-get? marketplace-listings { item-id: item-id }) err-listing-not-found))
+      (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+      (seller (get seller listing-data))
+      (price (get price listing-data))
+      (escrow-id (var-get next-escrow-id))
+      (current-block stacks-block-height)
+    )
+      (asserts! (get active listing-data) err-item-not-for-sale)
+      (asserts! (not (is-eq tx-sender seller)) err-cannot-buy-own-item)
+      
+      ;; Transfer STX to contract for escrow
+      (try! (stx-transfer? price tx-sender (as-contract tx-sender)))
+      
+      (map-set escrow-transactions
+        { escrow-id: escrow-id }
+        {
+          item-id: item-id,
+          buyer: tx-sender,
+          seller: seller,
+          amount: price,
+          created-at: current-block,
+          expires-at: (+ current-block (var-get escrow-duration)),
+          status: "active"
+        }
+      )
+      
+      (var-set next-escrow-id (+ escrow-id u1))
+      (ok escrow-id)
+    )
+  )
+)
+
+(define-public (complete-purchase (escrow-id uint))
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-escrow-id escrow-id) err-invalid-input)
+    
+    (let (
+      (escrow-data (unwrap! (map-get? escrow-transactions { escrow-id: escrow-id }) err-escrow-not-found))
+      (item-id (get item-id escrow-data))
+      (buyer (get buyer escrow-data))
+      (seller (get seller escrow-data))
+      (amount (get amount escrow-data))
+      (expires-at (get expires-at escrow-data))
+      (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+    )
+      (asserts! (is-eq tx-sender seller) err-not-authorized)
+      (asserts! (is-eq (get status escrow-data) "active") err-invalid-input)
+      (asserts! (<= stacks-block-height expires-at) err-escrow-expired)
+      
+      ;; Transfer STX to seller
+      (try! (as-contract (stx-transfer? amount tx-sender seller)))
+      
+      ;; Transfer item ownership
+      (map-set fashion-items
+        { item-id: item-id }
+        (merge item-data { owner: buyer })
+      )
+      
+      ;; Update ownership history
+      (map-set ownership-history
+        { item-id: item-id, sequence: u1 }
+        {
+          from: seller,
+          to: buyer,
+          timestamp: stacks-block-height,
+          price: amount
+        }
+      )
+      
+      ;; Remove marketplace listing
+      (map-delete marketplace-listings { item-id: item-id })
+      
+      ;; Mark escrow as completed
+      (map-set escrow-transactions
+        { escrow-id: escrow-id }
+        (merge escrow-data { status: "completed" })
+      )
+      
+      (ok true)
+    )
+  )
+)
+
+(define-public (cancel-escrow (escrow-id uint))
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-escrow-id escrow-id) err-invalid-input)
+    
+    (let (
+      (escrow-data (unwrap! (map-get? escrow-transactions { escrow-id: escrow-id }) err-escrow-not-found))
+      (buyer (get buyer escrow-data))
+      (amount (get amount escrow-data))
+      (expires-at (get expires-at escrow-data))
+    )
+      (asserts! (is-eq tx-sender buyer) err-not-authorized)
+      (asserts! (is-eq (get status escrow-data) "active") err-invalid-input)
+      (asserts! (> stacks-block-height expires-at) err-escrow-not-expired)
+      
+      ;; Refund STX to buyer
+      (try! (as-contract (stx-transfer? amount tx-sender buyer)))
+      
+      ;; Mark escrow as cancelled
+      (map-set escrow-transactions
+        { escrow-id: escrow-id }
+        (merge escrow-data { status: "cancelled" })
+      )
+      
       (ok true)
     )
   )
