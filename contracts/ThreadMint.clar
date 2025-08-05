@@ -46,35 +46,7 @@
 (define-data-var next-item-id uint u1)
 (define-data-var total-certified-items uint u0)
 
-;; Read-only functions
-(define-read-only (get-item-details (item-id uint))
-  (map-get? fashion-items { item-id: item-id })
-)
-
-(define-read-only (get-ownership-history (item-id uint) (sequence uint))
-  (map-get? ownership-history { item-id: item-id, sequence: sequence })
-)
-
-(define-read-only (is-brand-certified (brand (string-ascii 50)))
-  (default-to false (get authorized (map-get? certified-brands { brand: brand })))
-)
-
-(define-read-only (get-total-certified-items)
-  (var-get total-certified-items)
-)
-
-(define-read-only (get-next-item-id)
-  (var-get next-item-id)
-)
-
-(define-read-only (is-item-owner (item-id uint) (user principal))
-  (match (map-get? fashion-items { item-id: item-id })
-    item-data (is-eq (get owner item-data) user)
-    false
-  )
-)
-
-;; Helper function to validate string inputs
+;; Enhanced validation functions
 (define-private (validate-string-input (input (string-ascii 100)))
   (and (> (len input) u0) (<= (len input) u100))
 )
@@ -99,7 +71,60 @@
   (and (> item-id u0) (< item-id (var-get next-item-id)))
 )
 
-;; Public functions
+(define-private (validate-sequence (sequence uint))
+  (>= sequence u1)
+)
+
+(define-private (validate-score (score uint))
+  (<= score u100)
+)
+
+;; Read-only functions with enhanced validation
+(define-read-only (get-item-details (item-id uint))
+  (begin
+    ;; For read-only functions, we can still validate but return none instead of error
+    (if (validate-item-id item-id)
+      (map-get? fashion-items { item-id: item-id })
+      none
+    )
+  )
+)
+
+(define-read-only (get-ownership-history (item-id uint) (sequence uint))
+  (begin
+    (if (and (validate-item-id item-id) (validate-sequence sequence))
+      (map-get? ownership-history { item-id: item-id, sequence: sequence })
+      none
+    )
+  )
+)
+
+(define-read-only (is-brand-certified (brand (string-ascii 50)))
+  (if (validate-brand-input brand)
+    (default-to false (get authorized (map-get? certified-brands { brand: brand })))
+    false
+  )
+)
+
+(define-read-only (get-total-certified-items)
+  (var-get total-certified-items)
+)
+
+(define-read-only (get-next-item-id)
+  (var-get next-item-id)
+)
+
+(define-read-only (is-item-owner (item-id uint) (user principal))
+  (if (validate-item-id item-id)
+    (match (map-get? fashion-items { item-id: item-id })
+      item-data (is-eq (get owner item-data) user)
+      false
+    )
+    false
+  )
+)
+
+;; Public functions with improved validation order
 (define-public (register-brand (brand (string-ascii 50)))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
@@ -124,6 +149,7 @@
   (let (
     (item-id (var-get next-item-id))
   )
+    ;; Validate all inputs first
     (asserts! (validate-brand-input brand) err-invalid-input)
     (asserts! (validate-string-input model) err-invalid-input)
     (asserts! (validate-size-input size) err-invalid-input)
@@ -132,6 +158,8 @@
     (asserts! (> manufacturing-date u0) err-invalid-input)
     (asserts! (validate-principal owner) err-invalid-input)
     (asserts! (is-brand-certified brand) err-invalid-brand)
+    
+    ;; All validations passed, now mint the item
     (map-set fashion-items
       { item-id: item-id }
       {
@@ -153,52 +181,66 @@
 )
 
 (define-public (transfer-ownership (item-id uint) (new-owner principal) (price uint))
-  (let (
-    (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
-    (current-owner (get owner item-data))
-  )
+  (begin
+    ;; Validate inputs first
     (asserts! (validate-item-id item-id) err-invalid-input)
-    (asserts! (is-eq tx-sender current-owner) err-not-owner)
-    (asserts! (not (is-eq current-owner new-owner)) err-invalid-input)
-    (asserts! (> price u0) err-invalid-input)
     (asserts! (validate-principal new-owner) err-invalid-input)
-    (map-set fashion-items
-      { item-id: item-id }
-      (merge item-data { owner: new-owner })
+    (asserts! (> price u0) err-invalid-input)
+    
+    (let (
+      (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+      (current-owner (get owner item-data))
     )
-    (map-set ownership-history
-      { item-id: item-id, sequence: u1 }
-      {
-        from: current-owner,
-        to: new-owner,
-        timestamp: stacks-block-height,
-        price: price
-      }
+      (asserts! (is-eq tx-sender current-owner) err-not-owner)
+      (asserts! (not (is-eq current-owner new-owner)) err-invalid-input)
+      
+      (map-set fashion-items
+        { item-id: item-id }
+        (merge item-data { owner: new-owner })
+      )
+      (map-set ownership-history
+        { item-id: item-id, sequence: u1 }
+        {
+          from: current-owner,
+          to: new-owner,
+          timestamp: stacks-block-height,
+          price: price
+        }
+      )
+      (ok true)
     )
-    (ok true)
   )
 )
 
 (define-public (verify-authenticity (item-id uint))
-  (let (
-    (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
-  )
+  (begin
+    ;; Validate inputs first, then check authorization
     (asserts! (validate-item-id item-id) err-invalid-input)
     (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
-    (ok (get certified item-data))
+    
+    (let (
+      (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+    )
+      (ok (get certified item-data))
+    )
   )
 )
 
 (define-public (update-authenticity-score (item-id uint) (new-score uint))
-  (let (
-    (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
-  )
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-item-id item-id) err-invalid-input)
+    (asserts! (validate-score new-score) err-invalid-input)
     (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
-    (asserts! (<= new-score u100) err-invalid-input)
-    (map-set fashion-items
-      { item-id: item-id }
-      (merge item-data { authenticity-score: new-score })
+    
+    (let (
+      (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
     )
-    (ok true)
+      (map-set fashion-items
+        { item-id: item-id }
+        (merge item-data { authenticity-score: new-score })
+      )
+      (ok true)
+    )
   )
 )
