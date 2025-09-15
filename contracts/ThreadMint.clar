@@ -1,4 +1,4 @@
-;; ThreadMint - Fashion Authentication System with Marketplace
+;; ThreadMint - Fashion Authentication System with Marketplace and Multi-signature Authentication
 ;; This contract manages fashion item authentication, ownership tracking, and marketplace transactions
 
 (define-constant contract-owner tx-sender)
@@ -16,6 +16,16 @@
 (define-constant err-escrow-expired (err u111))
 (define-constant err-escrow-not-expired (err u112))
 (define-constant err-already-listed (err u113))
+(define-constant err-multisig-required (err u114))
+(define-constant err-already-signed (err u115))
+(define-constant err-insufficient-signatures (err u116))
+(define-constant err-not-brand-representative (err u117))
+(define-constant err-multisig-not-found (err u118))
+(define-constant err-multisig-already-completed (err u119))
+
+;; Multi-signature constants
+(define-constant high-value-threshold u100000) ;; STX microunits threshold for requiring multi-sig
+(define-constant required-signatures u2) ;; Number of signatures required
 
 ;; Storage for fashion items
 (define-map fashion-items
@@ -29,14 +39,41 @@
     manufacturing-date: uint,
     owner: principal,
     certified: bool,
-    authenticity-score: uint
+    authenticity-score: uint,
+    requires-multisig: bool
   }
 )
 
-;; Certified brands
+;; Certified brands with representatives
 (define-map certified-brands
   { brand: (string-ascii 50) }
   { authorized: bool, created-at: uint }
+)
+
+;; Brand representatives for multi-signature verification
+(define-map brand-representatives
+  { brand: (string-ascii 50), representative: principal }
+  { authorized: bool, added-at: uint }
+)
+
+;; Multi-signature verification requests
+(define-map multisig-verifications
+  { verification-id: uint }
+  {
+    item-id: uint,
+    brand: (string-ascii 50),
+    created-by: principal,
+    created-at: uint,
+    signatures-count: uint,
+    completed: bool,
+    expires-at: uint
+  }
+)
+
+;; Track signatures for each verification
+(define-map verification-signatures
+  { verification-id: uint, signer: principal }
+  { signed-at: uint }
 )
 
 ;; Ownership history
@@ -79,7 +116,9 @@
 (define-data-var next-item-id uint u1)
 (define-data-var total-certified-items uint u0)
 (define-data-var next-escrow-id uint u1)
+(define-data-var next-verification-id uint u1)
 (define-data-var escrow-duration uint u144) ;; ~24 hours in blocks
+(define-data-var verification-duration uint u1008) ;; ~7 days in blocks
 
 ;; Enhanced validation functions
 (define-private (validate-string-input (input (string-ascii 100)))
@@ -122,22 +161,38 @@
   (and (> escrow-id u0) (< escrow-id (var-get next-escrow-id)))
 )
 
-;; Read-only functions with enhanced validation
-(define-read-only (get-item-details (item-id uint))
-  (begin
-    (if (validate-item-id item-id)
-      (map-get? fashion-items { item-id: item-id })
-      none
+(define-private (validate-verification-id (verification-id uint))
+  (and (> verification-id u0) (< verification-id (var-get next-verification-id)))
+)
+
+(define-private (is-high-value-item (price uint))
+  (>= price high-value-threshold)
+)
+
+(define-private (is-brand-representative (brand (string-ascii 50)) (user principal))
+  (default-to false 
+    (get authorized 
+      (map-get? brand-representatives { brand: brand, representative: user })
     )
   )
 )
 
+(define-private (has-already-signed (verification-id uint) (signer principal))
+  (is-some (map-get? verification-signatures { verification-id: verification-id, signer: signer }))
+)
+
+;; Read-only functions with enhanced validation
+(define-read-only (get-item-details (item-id uint))
+  (if (validate-item-id item-id)
+    (map-get? fashion-items { item-id: item-id })
+    none
+  )
+)
+
 (define-read-only (get-ownership-history (item-id uint) (sequence uint))
-  (begin
-    (if (and (validate-item-id item-id) (validate-sequence sequence))
-      (map-get? ownership-history { item-id: item-id, sequence: sequence })
-      none
-    )
+  (if (and (validate-item-id item-id) (validate-sequence sequence))
+    (map-get? ownership-history { item-id: item-id, sequence: sequence })
+    none
   )
 )
 
@@ -187,6 +242,35 @@
   )
 )
 
+(define-read-only (get-verification-details (verification-id uint))
+  (if (validate-verification-id verification-id)
+    (map-get? multisig-verifications { verification-id: verification-id })
+    none
+  )
+)
+
+(define-read-only (get-brand-representative (brand (string-ascii 50)) (representative principal))
+  (if (validate-brand-input brand)
+    (map-get? brand-representatives { brand: brand, representative: representative })
+    none
+  )
+)
+
+(define-read-only (has-signed-verification (verification-id uint) (signer principal))
+  (if (validate-verification-id verification-id)
+    (is-some (map-get? verification-signatures { verification-id: verification-id, signer: signer }))
+    false
+  )
+)
+
+(define-read-only (get-high-value-threshold)
+  high-value-threshold
+)
+
+(define-read-only (get-required-signatures)
+  required-signatures
+)
+
 ;; Public functions with improved validation order
 (define-public (register-brand (brand (string-ascii 50)))
   (begin
@@ -200,6 +284,32 @@
   )
 )
 
+(define-public (add-brand-representative (brand (string-ascii 50)) (representative principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+    (asserts! (validate-brand-input brand) err-invalid-input)
+    (asserts! (validate-principal representative) err-invalid-input)
+    (asserts! (is-brand-certified brand) err-invalid-brand)
+    
+    (map-set brand-representatives
+      { brand: brand, representative: representative }
+      { authorized: true, added-at: stacks-block-height }
+    )
+    (ok true)
+  )
+)
+
+(define-public (remove-brand-representative (brand (string-ascii 50)) (representative principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+    (asserts! (validate-brand-input brand) err-invalid-input)
+    (asserts! (validate-principal representative) err-invalid-input)
+    
+    (map-delete brand-representatives { brand: brand, representative: representative })
+    (ok true)
+  )
+)
+
 (define-public (mint-fashion-item
   (brand (string-ascii 50))
   (model (string-ascii 100))
@@ -208,9 +318,11 @@
   (material (string-ascii 100))
   (manufacturing-date uint)
   (owner principal)
+  (estimated-value uint)
 )
   (let (
     (item-id (var-get next-item-id))
+    (requires-multisig (is-high-value-item estimated-value))
   )
     ;; Validate all inputs first
     (asserts! (validate-brand-input brand) err-invalid-input)
@@ -220,6 +332,7 @@
     (asserts! (validate-string-input material) err-invalid-input)
     (asserts! (> manufacturing-date u0) err-invalid-input)
     (asserts! (validate-principal owner) err-invalid-input)
+    (asserts! (validate-amount estimated-value) err-invalid-input)
     (asserts! (is-brand-certified brand) err-invalid-brand)
     
     ;; All validations passed, now mint the item
@@ -233,13 +346,125 @@
         material: material,
         manufacturing-date: manufacturing-date,
         owner: owner,
-        certified: true,
-        authenticity-score: u100
+        certified: (not requires-multisig),
+        authenticity-score: (if requires-multisig u0 u100),
+        requires-multisig: requires-multisig
       }
     )
     (var-set next-item-id (+ item-id u1))
-    (var-set total-certified-items (+ (var-get total-certified-items) u1))
+    
+    ;; Only increment certified items if not requiring multi-sig
+    (if (not requires-multisig)
+      (var-set total-certified-items (+ (var-get total-certified-items) u1))
+      true
+    )
     (ok item-id)
+  )
+)
+
+(define-public (create-multisig-verification (item-id uint))
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-item-id item-id) err-invalid-input)
+    
+    (let (
+      (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+      (brand (get brand item-data))
+      (verification-id (var-get next-verification-id))
+      (current-block stacks-block-height)
+    )
+      (asserts! (get requires-multisig item-data) err-invalid-input)
+      (asserts! (not (get certified item-data)) err-already-certified)
+      (asserts! (is-brand-representative brand tx-sender) err-not-brand-representative)
+      
+      (map-set multisig-verifications
+        { verification-id: verification-id }
+        {
+          item-id: item-id,
+          brand: brand,
+          created-by: tx-sender,
+          created-at: current-block,
+          signatures-count: u0,
+          completed: false,
+          expires-at: (+ current-block (var-get verification-duration))
+        }
+      )
+      
+      (var-set next-verification-id (+ verification-id u1))
+      (ok verification-id)
+    )
+  )
+)
+
+(define-public (sign-verification (verification-id uint))
+  (begin
+    ;; Validate inputs first
+    (asserts! (validate-verification-id verification-id) err-invalid-input)
+    
+    (let (
+      (verification-data (unwrap! (map-get? multisig-verifications { verification-id: verification-id }) err-multisig-not-found))
+      (brand (get brand verification-data))
+      (current-block stacks-block-height)
+      (expires-at (get expires-at verification-data))
+      (current-signatures (get signatures-count verification-data))
+    )
+      (asserts! (not (get completed verification-data)) err-multisig-already-completed)
+      (asserts! (<= current-block expires-at) err-escrow-expired)
+      (asserts! (is-brand-representative brand tx-sender) err-not-brand-representative)
+      (asserts! (not (has-already-signed verification-id tx-sender)) err-already-signed)
+      
+      ;; Add signature
+      (map-set verification-signatures
+        { verification-id: verification-id, signer: tx-sender }
+        { signed-at: current-block }
+      )
+      
+      (let (
+        (new-signatures-count (+ current-signatures u1))
+      )
+        ;; Update signatures count
+        (map-set multisig-verifications
+          { verification-id: verification-id }
+          (merge verification-data { signatures-count: new-signatures-count })
+        )
+        
+        ;; Check if we have enough signatures to complete verification
+        (if (>= new-signatures-count required-signatures)
+          (try! (complete-multisig-verification verification-id))
+          true
+        )
+      )
+      
+      (ok true)
+    )
+  )
+)
+
+(define-private (complete-multisig-verification (verification-id uint))
+  (let (
+    (verification-data (unwrap! (map-get? multisig-verifications { verification-id: verification-id }) err-multisig-not-found))
+    (item-id (get item-id verification-data))
+    (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+  )
+    ;; Mark verification as completed
+    (map-set multisig-verifications
+      { verification-id: verification-id }
+      (merge verification-data { completed: true })
+    )
+    
+    ;; Certify the item
+    (map-set fashion-items
+      { item-id: item-id }
+      (merge item-data { 
+        certified: true, 
+        authenticity-score: u100 
+      })
+    )
+    
+    ;; Increment certified items counter
+    (var-set total-certified-items (+ (var-get total-certified-items) u1))
+    
+    (ok true)
   )
 )
 
@@ -256,6 +481,7 @@
     )
       (asserts! (is-eq tx-sender current-owner) err-not-owner)
       (asserts! (not (is-eq current-owner new-owner)) err-invalid-input)
+      (asserts! (get certified item-data) err-not-authorized)
       
       ;; Remove from marketplace if listed
       (map-delete marketplace-listings { item-id: item-id })
@@ -323,7 +549,14 @@
       (current-owner (get owner item-data))
     )
       (asserts! (is-eq tx-sender current-owner) err-not-owner)
+      (asserts! (get certified item-data) err-not-authorized)
       (asserts! (not (is-item-listed item-id)) err-already-listed)
+      
+      ;; Check if high-value item requires multi-sig for marketplace listing
+      (if (is-high-value-item price)
+        (asserts! (>= (get authenticity-score item-data) u90) err-insufficient-signatures)
+        true
+      )
       
       (map-set marketplace-listings
         { item-id: item-id }
@@ -375,6 +608,7 @@
     )
       (asserts! (get active listing-data) err-item-not-for-sale)
       (asserts! (not (is-eq tx-sender seller)) err-cannot-buy-own-item)
+      (asserts! (get certified item-data) err-not-authorized)
       
       ;; Transfer STX to contract for escrow
       (try! (stx-transfer? price tx-sender (as-contract tx-sender)))
