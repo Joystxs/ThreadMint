@@ -40,8 +40,16 @@
     owner: principal,
     certified: bool,
     authenticity-score: uint,
-    requires-multisig: bool
+    requires-multisig: bool,
+    certified-at: (optional uint),
+    created-at: uint
   }
+)
+
+;; Brand item index for efficient querying
+(define-map brand-item-index
+  { brand: (string-ascii 50), item-id: uint }
+  { exists: bool }
 )
 
 ;; Certified brands with representatives
@@ -271,6 +279,13 @@
   required-signatures
 )
 
+(define-read-only (is-brand-item (brand (string-ascii 50)) (item-id uint))
+  (if (and (validate-brand-input brand) (validate-item-id item-id))
+    (default-to false (get exists (map-get? brand-item-index { brand: brand, item-id: item-id })))
+    false
+  )
+)
+
 ;; Public functions with improved validation order
 (define-public (register-brand (brand (string-ascii 50)))
   (begin
@@ -323,6 +338,7 @@
   (let (
     (item-id (var-get next-item-id))
     (requires-multisig (is-high-value-item estimated-value))
+    (current-block stacks-block-height)
   )
     ;; Validate all inputs first
     (asserts! (validate-brand-input brand) err-invalid-input)
@@ -348,9 +364,18 @@
         owner: owner,
         certified: (not requires-multisig),
         authenticity-score: (if requires-multisig u0 u100),
-        requires-multisig: requires-multisig
+        requires-multisig: requires-multisig,
+        certified-at: (if requires-multisig none (some current-block)),
+        created-at: current-block
       }
     )
+    
+    ;; Add to brand index
+    (map-set brand-item-index
+      { brand: brand, item-id: item-id }
+      { exists: true }
+    )
+    
     (var-set next-item-id (+ item-id u1))
     
     ;; Only increment certified items if not requiring multi-sig
@@ -445,6 +470,7 @@
     (verification-data (unwrap! (map-get? multisig-verifications { verification-id: verification-id }) err-multisig-not-found))
     (item-id (get item-id verification-data))
     (item-data (unwrap! (map-get? fashion-items { item-id: item-id }) err-item-not-found))
+    (current-block stacks-block-height)
   )
     ;; Mark verification as completed
     (map-set multisig-verifications
@@ -452,12 +478,13 @@
       (merge verification-data { completed: true })
     )
     
-    ;; Certify the item
+    ;; Certify the item with timestamp
     (map-set fashion-items
       { item-id: item-id }
       (merge item-data { 
         certified: true, 
-        authenticity-score: u100 
+        authenticity-score: u100,
+        certified-at: (some current-block)
       })
     )
     

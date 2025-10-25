@@ -11,6 +11,8 @@ ThreadMint combats fashion counterfeiting by creating immutable digital certific
 - **Brand Certification**: Register authorized fashion brands with representative management
 - **Multi-signature Authentication**: Require multiple brand representatives to verify high-value items
 - **Item Authentication**: Mint authenticated fashion items with detailed metadata
+- **Certification Timestamps**: Track when items were certified for full audit trail
+- **Brand Item Indexing**: Efficiently query items by brand
 - **Ownership Tracking**: Complete ownership history and transfer capabilities
 - **Authenticity Verification**: Verify item authenticity with scoring system
 - **Resale Value Tracking**: Track item value through ownership transfers
@@ -27,17 +29,19 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 - **Verification Process**: Requires signatures from 2+ brand representatives
 - **Time-Limited**: Verification requests expire after ~7 days
 - **Enhanced Security**: High-value marketplace listings require authenticity score ≥90
+- **Certification Tracking**: Items track creation and certification timestamps
 
 ### Multi-signature Workflow
 1. **Mint High-Value Item**: Item created with `requires-multisig: true`, `certified: false`
 2. **Create Verification**: Brand representative initiates verification request
 3. **Collect Signatures**: Multiple representatives sign the verification
 4. **Auto-Complete**: Item automatically certified when sufficient signatures collected
+5. **Timestamp Recorded**: Certification timestamp stored for audit trail
 
 ## Smart Contract Functions
 
 ### Read-Only Functions
-- `get-item-details(item-id)` - Get complete item information including multi-sig status
+- `get-item-details(item-id)` - Get complete item information including multi-sig status, timestamps
 - `get-ownership-history(item-id, sequence)` - Get ownership transfer history
 - `is-brand-certified(brand)` - Check if brand is certified
 - `get-total-certified-items()` - Get total number of certified items
@@ -50,6 +54,7 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 - `has-signed-verification(verification-id, signer)` - Check if user has signed verification
 - `get-high-value-threshold()` - Get current high-value threshold (100,000 STX microunits)
 - `get-required-signatures()` - Get required signatures count (2)
+- `is-brand-item(brand, item-id)` - **NEW** Check if item belongs to specific brand
 
 ### Public Functions
 
@@ -57,7 +62,7 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 - `register-brand(brand)` - Register a new certified brand (admin only)
 - `add-brand-representative(brand, representative)` - Add brand representative (admin only)
 - `remove-brand-representative(brand, representative)` - Remove brand representative (admin only)
-- `mint-fashion-item(brand, model, size, color, material, manufacturing-date, owner, estimated-value)` - Create new authenticated fashion item
+- `mint-fashion-item(brand, model, size, color, material, manufacturing-date, owner, estimated-value)` - Create new authenticated fashion item with automatic timestamp tracking
 - `transfer-ownership(item-id, new-owner, price)` - Transfer item ownership
 - `verify-authenticity(item-id)` - Verify item authenticity (admin only)
 - `update-authenticity-score(item-id, new-score)` - Update authenticity score
@@ -72,6 +77,18 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 - `create-purchase-escrow(item-id)` - Create escrow transaction for purchase
 - `complete-purchase(escrow-id)` - Complete purchase and transfer ownership
 - `cancel-escrow(escrow-id)` - Cancel expired escrow and refund buyer
+
+## What's New in This Version
+
+### Certification Timestamps
+- **Created At**: Every item now records its creation block height
+- **Certified At**: Items track when they were certified (for audit trail)
+- **Optional for Uncertified**: Uncertified items have `none` for certified-at until verification completes
+
+### Brand Item Index
+- **Efficient Querying**: New index map allows checking if item belongs to brand
+- **Brand Portfolio**: Enables brand-specific item queries
+- **Scalable Design**: Optimized for large-scale brand item management
 
 ## Installation
 
@@ -91,7 +108,7 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 (contract-call? .threadmint add-brand-representative "Nike" 'SP1234567890ABCDEF)
 (contract-call? .threadmint add-brand-representative "Nike" 'SP0987654321FEDCBA)
 
-;; Mint a regular fashion item
+;; Mint a regular fashion item (auto-certified with timestamp)
 (contract-call? .threadmint mint-fashion-item 
   "Nike" 
   "Air Max 90" 
@@ -100,9 +117,9 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
   "Leather/Mesh" 
   u20240101 
   'SP1234567890
-  u50000) ;; Below threshold - auto-certified
+  u50000) ;; Below threshold - auto-certified with timestamp
 
-;; Mint a high-value fashion item
+;; Mint a high-value fashion item (requires multi-sig)
 (contract-call? .threadmint mint-fashion-item 
   "Nike" 
   "Air Jordan 1 Retro High OG" 
@@ -111,7 +128,7 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
   "Premium Leather" 
   u20240101 
   'SP1234567890
-  u150000) ;; Above threshold - requires multi-sig
+  u150000) ;; Above threshold - requires multi-sig, no certified-at until verified
 ```
 
 ### Multi-signature Verification
@@ -122,8 +139,22 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 ;; Sign verification (first representative)
 (contract-call? .threadmint sign-verification u1)
 
-;; Sign verification (second representative) - auto-completes certification
+;; Sign verification (second representative) - auto-completes with timestamp
 (contract-call? .threadmint sign-verification u1)
+
+;; Check item details (includes certified-at timestamp)
+(contract-call? .threadmint get-item-details u2)
+```
+
+### Brand Item Queries
+```clarity
+;; Check if item belongs to brand
+(contract-call? .threadmint is-brand-item "Nike" u1)
+;; Returns: true
+
+;; Get full item details with timestamps
+(contract-call? .threadmint get-item-details u1)
+;; Returns item data including created-at and certified-at
 ```
 
 ### Marketplace Operations
@@ -151,6 +182,7 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 - **Dual Verification**: Requires minimum 2 brand representative signatures
 - **Time-Limited Process**: Verification requests expire after ~7 days (1008 blocks)
 - **Enhanced Marketplace Security**: High-value listings require authenticity score ≥90
+- **Timestamp Tracking**: Full audit trail with creation and certification timestamps
 
 ### Representative Management
 - **Authorized Representatives**: Only admin can add/remove brand representatives
@@ -162,7 +194,7 @@ Items with estimated values ≥100,000 STX microunits require multi-signature ve
 - **Request Creation**: Any brand representative can create verification request
 - **Collaborative Signing**: Multiple representatives must sign
 - **Automatic Completion**: Item certified when required signatures reached
-- **Audit Trail**: Complete signature history maintained
+- **Audit Trail**: Complete signature history maintained with timestamps
 
 ## Error Codes
 
@@ -194,6 +226,11 @@ Run the test suite:
 clarinet test
 ```
 
+Check contract syntax:
+```bash
+clarinet check
+```
+
 ## Security Features
 
 - **Input Validation**: Comprehensive validation for all parameters
@@ -203,6 +240,7 @@ clarinet test
 - **Ownership Verification**: Strict ownership checks for all operations
 - **Representative Authorization**: Secure brand representative management
 - **Signature Verification**: Prevention of duplicate signatures and unauthorized access
+- **Timestamp Tracking**: Full audit trail for certification events
 
 ## Architecture
 
@@ -210,18 +248,16 @@ clarinet test
 - **Brand Representatives Map**: Stores authorized representatives per brand
 - **Verification Requests Map**: Tracks active verification requests
 - **Signature Tracking Map**: Records individual signatures
-- **Automatic Certification**: Items certified when threshold reached
+- **Automatic Certification**: Items certified when threshold reached with timestamp
+
+### Enhanced Data Structures
+- **Certification Timestamps**: `certified-at` (optional uint) tracks certification block
+- **Creation Timestamps**: `created-at` (uint) tracks item creation block
+- **Brand Item Index**: Efficient brand-to-item relationship mapping
 
 ### Security Considerations
 - **High-Value Threshold**: Configurable threshold for multi-sig requirement
 - **Time Limits**: Verification requests have expiration dates
 - **Representative Validation**: Only authorized representatives can participate
-- **Audit Trail**: Complete history of verification process
-
-## Contributing
-
-1. Fork the repository
-2. Create feature branch
-3. Commit changes
-4. Push to branch
-5. Create Pull Request
+- **Audit Trail**: Complete history of verification process with timestamps
+- **Proper Error Handling**: All functions use proper Stacks syntax and validation
